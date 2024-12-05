@@ -44,6 +44,7 @@ int tnew;            // next available type
 int tk;              // current token
 int ival;            // current token value
 int ty;              // current expression type
+int compound;        // handle precedence of compound assignment
 int loc;             // local variable offset
 int line;            // current line number
 int src;             // print source and assembly flag
@@ -93,7 +94,7 @@ enum {
     Num = 128, // the character set of given source is limited to 7-bit ASCII
     Func, Syscall, Main, ClearCache, Glo, Par, Loc, Keyword, Id, Label, Load, Enter,
     Break, Continue, Case, Char, Default, Else, Enum, If, Int, Return,
-    Sizeof, Struct, Switch, For, While, DoWhile, Goto,
+    Sizeof, Struct, Union, Switch, For, While, DoWhile, Goto,
     Assign, // operator =, keep Assign as highest priority operator
     OrAssign, XorAssign, AndAssign, ShlAssign, ShrAssign, // |=, ^=, &=, <<=, >>=
     AddAssign, SubAssign, MulAssign, DivAssign, ModAssign, // +=, -=, *=, /=, %=
@@ -147,7 +148,7 @@ enum {
      *
      * If we need to refer to arg1, we need to fetch new_bp + 4, which can not
      * be achieved by restricted ADD instruction. Thus another special
-     * instrcution is introduced to do this: LEA <offset>.
+     * Instruction is introduced to do this: LEA <offset>.
      * The following pseudocode illustrates how LEA works.
      *     if (op == LEA) { ax = (int) (bp + *pc++); } // load address for arguments
      * Together with JSR, ENT, ADJ, LEV, and LEA instruction, we are able to make
@@ -300,7 +301,7 @@ int ef_getidx(char *name) // get cache index of external function
 }
 
 /* parse next token
- * 1. store data into id and then set the id to current lexcial form
+ * 1. store data into id and then set the id to current lexical form
  * 2. set tk to appropriate type
  */
 void next()
@@ -365,14 +366,14 @@ void next()
         }
         switch (tk) {
         case '\n':
-            /* Take an integer (representing an operation) and printing out
+            /* Take an integer (representing an operation) and print out
              * the name of that operation. First thing to say is that "* ++le"
              * is the integer representing the operation to perform.
              * This basically walks through the array of instructions
              * returning each integer in turn.
              *
              * Starting at the beginning of the line, we have "printf" with
-             * a format string of "%8.4s". This means print out the first 4
+             * a format string of "%8.4s". This means printing out the first 4
              * characters of the string that we are about to pass next (padded
              * to 8 characters). There then follows a string containing all of
              * the operation names, in numerical order, padded to 4 characters
@@ -380,7 +381,7 @@ void next()
              *
              * Finally, we do a lookup into this string (treating it as an
              * array) at offset "* ++le * 5", i.e. the integer representing
-             * the operation multipled by "5", being the number of characters
+             * the operation multiplied by "5", being the number of characters
              * between the start of each operation name). Doing this lookup
              * gives us a char, but actually we wanted the pointer to this
              * char (as we want printf to print out this char and the
@@ -454,12 +455,12 @@ void next()
                     case '0': ival = '\0'; break; // an int with value 0
                     }
                 }
-                // if it is double quotes (string literal), it is considered as
+                // If it is double quotes (string literal), it is considered as
                 // a string, copying characters to data
                 if (tk == '"') *data++ = ival;
             }
             ++p;
-            //  if .text too big rwdata v_addr will overlap it, add that to stay away from .text
+            //  If .text too big rwdata v_addr will overlap it, add that to stay away from .text
             if (tk == '"') ival = (int) pp; else tk = Num;
             return;
         case '=': if (*p == '=') { ++p; tk = Eq; } else tk = Assign; return;
@@ -539,9 +540,12 @@ int popcount(int i)
  * Dec     --
  * Bracket [
  */
+
+enum { REENTRANT = 0x10000 };
+
 void expr(int lev)
 {
-    int otk;
+    int tc;
     int t, *b, sz, *c;
     struct ident_s *d;
     struct member_s *m;
@@ -581,8 +585,9 @@ void expr(int lev)
         case Int: next(); break;
         case Char: next(); ty = CHAR; break;
         case Struct:
+        case Union:
             next();
-            if (tk != Id) fatal("bad struct type");
+            if (tk != Id) fatal("bad struct/union type");
             ty = id->stype; next(); break;
         }
         // multi-level pointers, plus `PTR` for each level
@@ -635,13 +640,13 @@ void expr(int lev)
     // Type cast or parenthesis
     case '(':
         next();
-        if (tk == Int || tk == Char || tk == Struct) {
+        if (tk == Int || tk == Char || tk == Struct || tk == Union) {
             switch (tk) {
             case Int: next(); t = INT; break;
             case Char: next(); t = CHAR; break;
             default:
                 next();
-                if (tk != Id) fatal("bad struct type");
+                if (tk != Id) fatal("bad struct/union type");
                 t = id->stype; next(); break;
             }
             // t: pointer
@@ -706,7 +711,9 @@ void expr(int lev)
         if (*n != Load) fatal("bad lvalue in pre-increment");
         *n = t;
         break;
-    default: fatal("bad expression");
+    default:
+        if (tk & REENTRANT) tk ^= REENTRANT;
+        else fatal("bad expression");
     }
 
     // "precedence climbing" or "Top Down Operator Precedence" method
@@ -733,23 +740,11 @@ void expr(int lev)
         case MulAssign:
         case DivAssign:
         case ModAssign:
-            otk = tk;
-            *--n=';'; *--n = ty = id->type; *--n = Load;
-            sz = (ty = t) >= PTR2 ? sizeof(int) :
-                                    ty >= PTR ? tsize[ty - PTR] : 1;
-            next(); c = n; expr(otk);
-            if (*n == Num) n[1] *= sz;
-            *--n = (int) c;
-            if (otk < ShlAssign) {
-                *--n = Or + (otk - OrAssign);
-            } else {
-                *--n = Shl + (otk - ShlAssign);
-                // Compound-op bypasses literal const optimizations
-                if (otk == DivAssign) ef_getidx("__aeabi_idiv");
-                if (otk == ModAssign) ef_getidx("__aeabi_idivmod");
-            }
+            *--n=';'; *--n = t; *--n = Load;
+            if (tk < ShlAssign) tk = Or + (tk - OrAssign);
+            else tk = Shl + (tk - ShlAssign);
+            tk |= REENTRANT; compound = 1; expr(Assign);
             *--n = (int) (b + 2); *--n = ty = t; *--n = Assign;
-            ty = INT;
             break;
         case Cond: // `x?a:b` is similar to if except that it relies on else
             next(); expr(Assign);
@@ -771,19 +766,25 @@ void expr(int lev)
             ty = INT;
             break;
         case Or: // push the current value, calculate the right value
-            next(); expr(Xor);
+            next();
+            if (compound) { compound = 0; expr(Assign); }
+            else expr(Xor);
             if (*n == Num && *b == Num) n[1] = b[1] | n[1];
             else { *--n = (int) b; *--n = Or; }
             ty = INT;
             break;
         case Xor:
-            next(); expr(And);
+            next();
+            if (compound) { compound = 0; expr(Assign); }
+            else expr(And);
             if (*n == Num && *b == Num) n[1] = b[1] ^ n[1];
             else { *--n = (int) b; *--n = Xor; }
             ty = INT;
             break;
         case And:
-            next(); expr(Eq);
+            next();
+            if (compound) { compound = 0; expr(Assign); }
+            else expr(Eq);
             if (*n == Num && *b == Num) n[1] = b[1] & n[1];
             else { *--n = (int) b; *--n = And; }
             ty = INT;
@@ -825,50 +826,94 @@ void expr(int lev)
             ty = INT;
             break;
         case Shl:
-            next(); expr(Add);
+            next();
+            if (compound) { compound = 0; expr(Assign); }
+            else expr(Add);
             if (*n == Num && *b == Num) {
-                if (n[1] < 0) n[1] = b[1] >> -n[1];
-                else n[1] = b[1] << n[1];
+                n[1] = b[1] << n[1];
             } else { *--n = (int) b; *--n = Shl; }
             ty = INT;
             break;
         case Shr:
-            next(); expr(Add);
+            next();
+            if (compound) { compound = 0; expr(Assign); }
+            else expr(Add);
             if (*n == Num && *b == Num) {
-                if (n[1] < 0) n[1] = b[1] << -n[1];
-                else n[1] = b[1] >> n[1];
+                n[1] = b[1] >> n[1];
             } else { *--n = (int) b; *--n = Shr; }
             ty = INT;
             break;
         case Add:
-            next(); expr(Mul);
-            sz = (ty = t) >= PTR2 ? sizeof(int) :
-                                    ty >= PTR ? tsize[ty - PTR] : 1;
-            if (*n == Num) n[1] *= sz;
+            next();
+            if (compound) { compound = 0; expr(Assign); }
+            else expr(Mul);
+            tc = ((t | ty) & (PTR | PTR2)) ? (t >= PTR) : (t >= ty);
+            c = n; if (tc) ty = t;
+            sz = (ty >= PTR2) ? sizeof(int) :
+                 ((ty >= PTR) ? tsize[ty - PTR] : 1);
+            if (*n == Num && tc) { n[1] *= sz; sz = 1; }
+            else if (*b == Num && !tc) { b[1] *= sz; sz = 1; }
             if (*n == Num && *b == Num) n[1] += b[1];
+            else if (sz != 1) {
+                *--n = sz; *--n = Num;
+                *--n = (int) (tc ? c : b); *--n = Mul;
+                *--n = (int) (tc ? b : c); *--n = Add;
+            }
             else { *--n = (int) b; *--n = Add; }
             break;
-        case Sub:
-            next(); expr(Mul);
-            sz = t >= PTR2 ? sizeof(int) : t >= PTR ? tsize[t - PTR] : 1;
-            if (sz > 1 && *n == Num) {
-                *--n = sz; *--n = Num; --n; *n = (int) (n + 3); *--n = Mul;
-            }
-            if (*n == Num && *b == Num) n[1] = b[1] - n[1];
-            else {
-                *--n = (int) b; *--n = Sub;
-                if (t == ty && sz > 1) {
-                    switch (sz) {
-                    case 4: *--n = 2; *--n = Num; --n; *n = (int) (n + 3);
-                            *--n = Shr; break;
-                    default: *--n = sz; *--n = Num; --n; *n = (int) (n + 3);
-                             *--n = Sub;
+        case Sub: // 4 cases: ptr-ptr, ptr-int, int-ptr (err), int-int
+            next();
+            if (compound) { compound = 0; expr(Assign); }
+            else expr(Mul); // t = left type, ty = right type
+            if (t < PTR && ty >= PTR) fatal("bad pointer subtraction");
+            if (t >= PTR) { // left arg is ptr
+                sz = (t >= PTR2) ? sizeof(int) : tsize[t - PTR];
+                if (ty >= PTR) { // ptr - ptr
+                    if (t != ty) fatal("mismatched ptr type subtraction");
+                    if (*n == Num && *b == Num) n[1] = (b[1] - n[1]) / sz;
+                    else {
+                        *--n = (int) b; *--n = Sub;
+                        if (sz > 1) {
+                            if ((sz & (sz - 1)) == 0) { // 2^n
+                                *--n = popcount(sz - 1); *--n = Num;
+                                --n; *n = (int) (n + 3); *--n = Shr;
+                            } else {
+                                *--n = sz; *--n = Num; --n; *n = (int) (n + 3);
+                                *--n = Div; ef_getidx("__aeabi_idiv");
+                            }
+                        }
                     }
+                    ty = INT;
+                } else { // ptr - int
+                    if (*n == Num) {
+                        n[1] *= sz;
+                        if (*b == Num) n[1] = b[1] - n[1];
+                        else { *--n = (int) b; *--n = Sub; }
+                    } else {
+                        if (sz > 1) {
+                            if ((sz & (sz - 1)) == 0) { // 2^n
+                                *--n = popcount(sz - 1); *--n = Num;
+                                --n; *n = (int) (n + 3); *--n = Shl;
+                            }
+                            else {
+                                *--n = sz; *--n = Num;
+                                --n; *n = (int) (n + 3); *--n = Mul;
+                            }
+                        }
+                        *--n = (int) b; *--n = Sub;
+                    }
+                    ty = t;
                 }
+            } else { // int - int
+                if (*n == Num && *b == Num) n[1] = b[1] - n[1];
+                else { *--n = (int) b; *--n = Sub; }
+                ty = INT;
             }
             break;
         case Mul:
-            next(); expr(Inc);
+            next();
+            if (compound) { compound = 0; expr(Assign); }
+            else expr(Inc);
             if (*n == Num && *b == Num) n[1] *= b[1];
             else {
                 *--n = (int) b;
@@ -889,7 +934,9 @@ void expr(int lev)
             next();
             break;
         case Div:
-            next(); expr(Inc);
+            next();
+            if (compound) { compound = 0; expr(Assign); }
+            else expr(Inc);
             if (*n == Num && *b == Num) n[1] = b[1] / n[1];
             else {
                 *--n = (int) b;
@@ -903,7 +950,9 @@ void expr(int lev)
             ty = INT;
             break;
         case Mod:
-            next(); expr(Inc);
+            next();
+            if (compound) { compound = 0; expr(Assign); }
+            else expr(Inc);
             if (*n == Num && *b == Num) n[1] = b[1] % n[1];
             else {
                 *--n = (int) b;
@@ -918,6 +967,7 @@ void expr(int lev)
             break;
         case Dot:
             ty += PTR;
+            if (n[0] == Load && n[1] > INT && n[1] < PTR) n += 2; // struct
         case Arrow:
             if (ty <= PTR+INT || ty >= PTR2) fatal("structure expected");
             next();
@@ -930,6 +980,7 @@ void expr(int lev)
             }
             ty = m->type;
             if (ty <= INT || ty >= PTR) *--n = (ty == CHAR) ? CHAR : INT;
+            else *--n = ty; // struct, not struct pointer
             *--n = Load;
             next();
             break;
@@ -947,8 +998,8 @@ void expr(int lev)
             }
             if (*n == Num && *b == Num) n[1] += b[1];
             else { *--n = (int) b; *--n = Add; }
-            if ((ty = t) <= INT || ty >= PTR)
-                *--n = (ty == CHAR) ? CHAR : INT;
+            if ((ty = t) <= INT || ty >= PTR) *--n = (ty == CHAR) ? CHAR : INT;
+            else *--n = ty; // struct, not struct pointer
             *--n = Load;
             break;
         default:
@@ -957,7 +1008,7 @@ void expr(int lev)
     }
 }
 
-// AST parsing for IR generatiion
+// AST parsing for IR generation
 // With a modular code generator, new targets can be easily supported such as
 // native Arm machine code.
 void gen(int *n)
@@ -982,7 +1033,8 @@ void gen(int *n)
         break;
     case Load:
         gen(n + 2); // load the value
-        if (n[1] <= INT || n[1] >= PTR) { *++e = (n[1] == CHAR) ? LC : LI; }
+        if (n[1] > INT && n[1] < PTR) fatal("struct copies not yet supported");
+        *++e = (n[1] == CHAR) ? LC : LI;
         break;
     case Assign: // assign the value to variables
         gen((int *) n[2]); *++e = PSH; gen(n + 3);
@@ -1013,7 +1065,7 @@ void gen(int *n)
         // Point "b" to the jump address field to be patched later.
         if (n[3]) {
             *b = (int) (e + 3); *++e = JMP; b = ++e; gen((int *) n[3]);
-        } // else statment
+        } // else statement
         // Patch the jump address field pointed to by "d" to hold the address
         // past the false branch.
         *b = (int) (e + 1);
@@ -1108,7 +1160,7 @@ void gen(int *n)
         gen((int *) n[1]); // condition
         a = cas; *++e = JMP; cas = ++e;
         b = brks; d = def; brks = def = 0;
-        gen((int *) n[2]); // case statment
+        gen((int *) n[2]); // case statement
         // deal with no default inside switch case
         *cas = def ? (int) def : (int) (e + 1); cas = a;
         while (brks) { t = (int *) * brks; *brks = (int) (e + 1); brks = t; }
@@ -1144,7 +1196,7 @@ void gen(int *n)
     case Return:
         if (n[1]) gen((int *) n[1]); *++e = LEV; break; // parse return AST
     case '{':
-        // parse expression or statment from AST
+        // parse expression or statement from AST
         gen((int *) n[1]); gen(n + 2); break;
     case Enter: *++e = ENT; *++e = n[1]; gen(n + 2);
                 if (*e != LEV) *++e = LEV; break;
@@ -1174,7 +1226,7 @@ void check_label(int **tt)
 void stmt(int ctx)
 {
     int *a, *b, *c, *d;
-    int i, j;
+    int i, j, atk;
     int bt;
 
     switch (tk) {
@@ -1214,9 +1266,11 @@ void stmt(int ctx)
     case Int:
     case Char:
     case Struct:
+    case Union:
         switch (tk) {
         case Struct:
-            next();
+        case Union:
+            atk = tk; next();
             if (tk == Id) {
                 if (!id->stype) id->stype = tnew++;
                 bt = id->stype;
@@ -1225,6 +1279,7 @@ void stmt(int ctx)
                 bt = tnew++;
             }
             if (tk == '{') {
+                tsize[bt] = 0; // for unions
                 next();
                 if (members[bt]) fatal("duplicate structure definition");
                 i = 0;
@@ -1234,14 +1289,15 @@ void stmt(int ctx)
                     case Int: next(); break;
                     case Char: next(); mbt = CHAR; break;
                     case Struct:
+                    case Union:
                         next();
-                        if (tk != Id) fatal("bad struct declaration");
+                        if (tk != Id) fatal("bad struct/union declaration");
                         mbt = id->stype;
                         next(); break;
                     }
                     while (tk != ';') {
                         ty = mbt;
-                        // if the beginning of * is a pointer type,
+                        // If the beginning of * is a pointer type,
                         // then type plus `PTR` indicates what kind of pointer
                         while (tk == Mul) { next(); ty += PTR; }
                         if (tk != Id) fatal("bad struct member definition");
@@ -1253,13 +1309,14 @@ void stmt(int ctx)
                         members[bt] = m;
                         i += (ty >= PTR) ? sizeof(int) : tsize[ty];
                         i = (i + 3) & -4;
+                        if (atk == Union) { if (i > tsize[bt]) tsize[bt] = i ; i = 0; }
                         next();
                         if (tk == ',') next();
                     }
                     next();
                 }
                 next();
-                tsize[bt] = i;
+                if (atk != Union) tsize[bt] = i;
             }
             break;
         case Int:
@@ -1272,9 +1329,10 @@ void stmt(int ctx)
          * "enum" finishes by "tk == ';'", so the code below will be skipped.
          * While current token is not statement end or block end.
          */
+        b = 0;
         while (tk != ';' && tk != '}' && tk != ',' && tk != ')') {
             ty = bt;
-            // if the beginning of * is a pointer type, then type plus `PTR`
+            // If the beginning of * is a pointer type, then type plus `PTR`
             // indicates what kind of pointer
             while (tk == Mul) { next(); ty += PTR; }
             switch (ctx) {
@@ -1290,7 +1348,9 @@ void stmt(int ctx)
             next();
             id->type = ty;
             if (tk == '(') { // function
+                if (b != 0) fatal("func decl can't be mixed with var decl(s)");
                 if (ctx != Glo) fatal("nested function");
+                if (ty > INT && ty < PTR) fatal("return type can't be struct");
                 id->class = Func; // type is function
                 // "+ 1" is because the code to add instruction always uses "++e".
                 id->val = (int) (e + 1); // function Pointer? offset/address
@@ -1331,17 +1391,24 @@ void stmt(int ctx)
                 }
             }
             else {
+                int sz = ((ty <= INT || ty >= PTR) ? sizeof(int) : tsize[ty]);
                 id->hclass = id->class; id->class = ctx;
                 id->htype = id->type; id->type = ty;
                 id->hval = id->val;
-                if (ctx == Glo) { id->val = (int) data; data += sizeof(int); }
-                else if (ctx == Loc) { id->val = ++ld; }
-                else if (ctx == Par) { id->val = ld++; }
+                if (ctx == Glo) { id->val = (int) data; data += sz; }
+                else if (ctx == Loc) { id->val = (ld += sz / sizeof(int)); }
+                else if (ctx == Par) {
+                    if (ty > INT && ty < PTR) // local struct decl
+                        fatal("struct parameters must be pointers");
+                    id->val = ld++;
+                }
                 if (ctx == Loc && tk == Assign) {
                     int ptk = tk;
-                    *--n = loc - id->val; *--n = Loc;
+                    if (b == 0) *--n = ';';
+                    b = n; *--n = loc - id->val; *--n = Loc;
                     next(); a = n; expr(ptk);
                     *--n = (int)a; *--n = ty; *--n = Assign;
+                    *--n = (int) b; *--n = '{';
                 }
             }
             if (ctx != Par && tk == ',') next();
@@ -1458,7 +1525,7 @@ void stmt(int ctx)
         if (tk != '(') fatal("open parentheses expected");
         next();
         *--n = ';';
-        expr(Assign);
+        if (tk != ';') expr(Assign);
         while (tk == ',') {
             int *f = n; next(); expr(Assign); *--n = (int) f; *--n = '{';
         }
@@ -1470,7 +1537,7 @@ void stmt(int ctx)
         if (tk != ';') fatal("semicolon expected");
         next();
         *--n = ';';
-        expr(Assign);
+        if (tk != ')') expr(Assign);
         while (tk == ',') {
             int *g = n; next(); expr(Assign); *--n = (int) g; *--n = '{';
         }
@@ -1498,7 +1565,8 @@ void stmt(int ctx)
         next();
         *--n = ';';
         while (tk != '}') {
-            a = n; check_label(&a); stmt(ctx); *--n = (int) a; *--n = '{';
+            a = n; check_label(&a); stmt(ctx);
+            if (a != n) { *--n = (int) a; *--n = '{'; }
         }
         next();
         return;
@@ -1522,7 +1590,7 @@ int reloc_bl(int offset) { return 0xeb000000 | reloc_imm(offset); }
 
 int *codegen(int *jitmem, int *jitmap)
 {
-    int i, tmp;
+    int i, ii, tmp, c;
     int *je, *tje;    // current position in emitted native code
     int *immloc, *il;
 
@@ -1565,10 +1633,12 @@ int *codegen(int *jitmem, int *jitmap)
             break;
         case ENT:
             *je++ = 0xe92d4800; *je++ = 0xe28db000; // push {fp, lr}; add  fp, sp, #0
-            tmp = *pc++; if (tmp) *je++ = 0xe24dd000 | (tmp * 4); // sub  sp, sp, #(tmp * 4)
-            if (tmp >= 64 || tmp < 0) {
-                printf("jit: ENT %d out of bounds\n", tmp); exit(6);
-            }
+            ii = c = 0; tmp = 4 * (*pc++);
+            while (tmp >= 255) { c |= tmp & 3; tmp >>= 2; ++ii; }
+            tmp += (c ? 1 : 0); if ((tmp << (2*ii)) >= 32768 || tmp < 0) {
+                printf("jit: ENT %d out of bounds\n", tmp << (2*ii)); exit(6);
+            } // sub  sp, sp, #tmp (scaled)
+            if (tmp) *je++ = 0xe24dd000 | (((16-ii) & 0xf) << 8) | tmp;
             break;
         case ADJ:
             *je++ = 0xe28dd000 + *pc++ * 4;      // add sp, sp, #(tmp * 4)
@@ -1730,7 +1800,7 @@ int *codegen(int *jitmem, int *jitmap)
                    reloc_imm(jitmap[(tmp - (int) text) >> 2] - (int) je));
         }
         // If the instruction has operand, increment instruction pointer to
-        // skip he operand.
+        // skip the operand.
         else if (i <= ADJ || i == SYSC) { ++pc; }
     }
     free(iv);
@@ -2389,11 +2459,11 @@ int main(int argc, char **argv)
     memset(ast, 0, poolsz);
     ast = (int *) ((int) ast + poolsz); // abstract syntax tree is most efficiently built as a stack
 
-    /* Resgister keywords and system calls to symbol stack
+    /* Register keywords and system calls to symbol stack
      * must match the sequence of enum
      */
-    p = "break continue case char default else enum if int return "
-        "sizeof struct switch for while do goto __clear_cache void main";
+    p = "break continue case char default else enum if int return sizeof "
+        "struct union switch for while do goto __clear_cache void main";
 
     // call "next" to create symbol table entry.
     // store the keyword's token type in the symbol table entry's "tk" field.

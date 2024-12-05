@@ -1,43 +1,47 @@
 # AMaCC = Arguably Minimalist Arm C Compiler
 
 ## Introduction
-AMaCC is built from scratch, targeted at 32-bit Arm architecture.
-It is a stripped down version of C meant as a pedagogical tool for
+AMaCC is a 32-bit Arm architecture compiler built from scratch.
+It serves as a stripped-down version of C, designed as a pedagogical tool for
 learning about compilers, linkers, and loaders.
 
-There are 2 execution modes AMaCC implements:
-* Just-in-Time compiler (JITC) for Arm backend
-* Generate valid GNU/Linux executables with Executable and Linkable Format (ELF)
+There are two execution modes AMaCC implements:
+* Just-in-Time (JIT) compiler for Arm backend.
+* Generation of valid GNU/Linux executables using the Executable and Linkable Format (ELF).
 
-It is worth mentioning that AMaCC is designed to compile a subset of C
-required to self-host with the above execution modes. For example,
-global variables and, in particular, global arrays are there.
+It is worth mentioning that AMaCC is designed to compile a subset of C necessary
+to self-host with the above execution modes. For instance, it supports global
+variables, particularly global arrays.
 
-A simple stack based AST is generated through cooperating `stmt()` and `expr()`
-parsing functions, both of which are fed by a token generating function.
-The `expr()` function does some literal constant optimizations. The AST is
-transformed into a stack-based VM Intermediate Representation via a `gen()`
-function.  The IR can be examined through a command-line option.  Finally,
-a `codegen()` function is used to generate ARM32 instructions from the IR
-which can be executed via either `jit()` or `elf32()` executable generation.
+A simple stack-based Abstract Syntax Tree (AST) is generated through cooperative
+`stmt()` and `expr()` parsing functions, both fed by a token-generating function.
+The `expr()` function performs some literal constant optimizations. The AST is
+transformed into a stack-based VM Intermediate Representation (IR) using the
+`gen()` function. The IR can be examined via a command-line option. Finally, the
+`codegen()` function generates Arm32 instructions from the IR, which can be
+executed via either `jit()` or `elf32()` executable generation
 
-AMACC mixes classical recursive descent and operator precedence parsing.
-An operator precedence parser is actually quite a bit faster than
-recursive descent parser (RDP) for expressions when operator precedence
-is defined using grammar productions that would otherwise get turned
-into methods.
+AMaCC combines classical recursive descent and operator precedence parsing. An
+operator precedence parser proves to be considerably faster than a recursive
+descent parser (RDP) for expressions when operator precedence is defined using
+grammar productions that would otherwise be turned into methods.
 
 ## Compatibility
 AMaCC is capable of compiling C source files written in the following
 syntax:
 
-* support for all C89 statements.
+* support for all C89 statements except typedef.
 * support for all C89 expression operators.
-* data types: char, int, enum, struct, and multi-level pointers
+* data types: char, int, enum, struct, union, and multi-level pointers
     - type modifiers, qualifiers, and storage class specifiers are
       currently unsupported, though many keywords of this nature
       are not routinely used, and can be easily worked around with
       simple alternative constructs.
+    - struct/union assignments are not supported at the language level
+      in AMaCC, e.g. s1 = s2.  This also applies to function return
+      values and parameters. Passing and returning pointers is recommended.
+      Use memcpy if you want to copy a full struct, e.g.
+      memcpy(&s1, &s2, sizeof(struct xxx));
 * global/local variable initializations for supported data types
     - e.g., `int i = [expr]`
     - New variables are allowed to be declared within functions anywhere.
@@ -45,8 +49,8 @@ syntax:
     - but aggregate array declaration and initialization is yet to be supported
       e.g., `int foo[2][2] = { { 1, 0 }, { 0, 1 } };`
 
-The architecture support targets armv7hf with Linux ABI, verified on
-Raspberry Pi 2/3/4 with GNU/Linux.
+The architecture support targets armv7hf with Linux ABI, and it has been verified
+on Raspberry Pi 2/3/4 with GNU/Linux.
 
 ## Prerequisites
 * Code generator in AMaCC relies on several GNU/Linux behaviors, and it
@@ -84,7 +88,7 @@ Test environment:
 
 Input source file: `amacc.c`
 
-| comiler driver                     | binary size (KiB) | compile time (s) |
+| compiler driver                    | binary size (KiB) | compile time (s) |
 | ---------------------------------- | ----------------- | ---------------- |
 | gcc with `-O0 -ldl` (compile+link) | 56                |  0.5683          |
 | gcc with `-O0 -c` (compile only)   | 56                |  0.4884          |
